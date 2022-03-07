@@ -551,6 +551,83 @@ class MH(SMC_KERNEL):
         return stats
 
 
+class HMC(SMC_KERNEL):
+    def __init__(self, n_steps, vars, path_length, max_steps, target_variable, **kwargs):
+        super().__init__(**kwargs)
+        self.hmc_chains = None
+        self.steps_stats = []
+        self.n_steps = n_steps
+        self.vars = vars
+        self.path_length = path_length
+        self.max_steps = max_steps
+        self.acceptance_rates = None
+        self.divergence_rates = None
+        self.n_chains = None
+        self.target_variable = target_variable
+
+    def _build_hmc_chains(self):
+        tempered_compiled_logp = self.build_tempered_logp_dlogp_func()
+        self.hmc_chains = [
+            HamiltonianMC(
+                self.vars, self.path_length, self.max_steps, logp_dlogp_func=tempered_compiled_logp
+            )
+            for _ in range(0, self.n_chains)
+        ]
+
+    def setup_kernel(self):
+        self.n_chains = self.tempered_posterior.shape[0]
+        self._build_hmc_chains()
+
+    def update_beta_and_weights(self):
+        super().update_beta_and_weights()
+        self._build_hmc_chains()
+
+    def mutate(self):
+        # TODO This is serial, multithreaded?
+        mutated_particles = []
+        self.acceptance_rates = []
+        self.divergence_rates = []
+        for chain, particle in zip(self.hmc_chains, self.tempered_posterior):
+            # TODO this only works for one target variable (aka posterior of just one variable).
+            q = {self.target_variable: particle[0] if particle.shape == (1,) else particle}
+            accepted = 0
+            diverging = 0
+            for step in range(self.max_steps):
+                q, step_stats = chain.step(q)
+                accepted += 1 if step_stats[0]["accepted"] else 0
+                diverging += 1 if step_stats[0]["diverging"] else 0
+            self.acceptance_rates.append(accepted / self.max_steps)
+            self.divergence_rates.append(diverging / self.max_steps)
+            mutated_particles.append(q)
+
+        samples = [p[self.target_variable].ravel() for p in mutated_particles]
+        tempered_posterior_logp, pl, ll = self._tempered_posterior_p(samples)
+
+        self.tempered_posterior = np.array(samples)
+        self.prior_logp = pl
+        self.likelihood_logp = ll
+        self.tempered_posterior_logp = tempered_posterior_logp
+
+        return mutated_particles
+
+    def sample_stats(self):
+        stats = super().sample_stats()
+        stats.update(
+            {
+                "mean_acceptance_rate": np.mean(self.acceptance_rates),
+                "mean_divergence_rate": np.mean(self.divergence_rates),
+            }
+        )
+        return stats
+
+    def sample_settings(self):
+        settings = super().sample_settings()
+        return settings
+
+    def build_tempered_logp_dlogp_func(self):
+        return self.model.logp_dlogp_function(smc=True, beta=self.beta)
+
+
 def _logp_forw(point, out_vars, in_vars, shared):
     """Compile Aesara function of the model and the input and output variables.
 
