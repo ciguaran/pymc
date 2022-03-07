@@ -26,12 +26,13 @@ from aesara.tensor.random.var import (
 )
 from aesara.tensor.sort import SortOp
 from arviz.data.inference_data import InferenceData
+from pytest import approx
 
 import pymc as pm
 
 from pymc.aesaraf import floatX
 from pymc.backends.base import MultiTrace
-from pymc.smc.smc import IMH
+from pymc.smc.smc import HMC, IMH
 from pymc.tests.helpers import SeededTest, assert_random_state_equal
 
 
@@ -78,6 +79,15 @@ class TestSMC(SeededTest):
         with pm.Model() as self.fast_model:
             x = pm.Normal("x", 0, 1)
             y = pm.Normal("y", x, 1, observed=0)
+
+        with pm.Model() as self.fast_model_with_difference:
+            """
+            Still a fast model, but observed is so
+            different from prior that posterior
+            and prior are far away.
+            """
+            x = pm.Normal("x", 1, 2)
+            y = pm.Normal("y", x, 2, observed=[50, 50, 50])
 
     def test_sample(self):
         initial_rng_state = np.random.get_state()
@@ -252,6 +262,71 @@ class TestSMC(SeededTest):
                 match="save_log_pseudolikelihood has been deprecated",
             ):
                 pm.sample_smc(draws=10, chains=1, save_log_pseudolikelihood=True)
+
+    def test_hmc_sample_fast(self):
+        with self.fast_model_with_difference:
+            inference_data = pm.sample_smc(
+                10,
+                kernel=HMC,
+                n_steps=2,
+                path_length=1,
+                max_steps=4,
+                vars=None,
+                cores=1,
+                target_variable="x",
+            )
+            stats = inference_data.sample_stats
+        assert stats.mean_acceptance_rate is not None
+        assert stats.mean_divergence_rate is not None
+        assert np.isclose(np.mean(inference_data.posterior.sel(chain=1)["x"].values), 37, atol=1)
+
+    def test_hmc_unit(self):
+        """
+        Given a fast model and an HMC kernel,
+        """
+        with self.fast_model_with_difference:
+            """
+            Then kernel setup builds one particle per draw
+            """
+            expected_draws = 10
+            sampler = HMC(10, None, 10, 10, draws=expected_draws, target_variable="x")
+            sampler._initialize_kernel()
+            sampler.setup_kernel()
+            assert len(sampler.hmc_chains) == expected_draws
+
+            """
+            Given an initialized sampler, it can be mutated
+            Beta hasn't been updated, so samples
+            belong to the prior.
+            Prior's mean for mu is 1 and posterior's mean should be approx 37 +- 1
+            """
+            mutated_particles = sampler.mutate()
+
+            assert sampler.beta == 0
+            assert len(mutated_particles) == expected_draws
+            assert len(mutated_particles[0]) == 1
+            assert "x" in mutated_particles[0]
+            samples = [particle["x"] for particle in mutated_particles]
+            assert np.mean(samples) == approx(1, abs=1)
+
+            stats = sampler.sample_stats()
+            assert stats["beta"] == 0
+            assert "mean_acceptance_rate" in stats
+
+    def test_hmc_sample_gaussian(self):
+        with self.SMC_test:
+            idata_smc_hmc = pm.sample_smc(
+                10,
+                kernel=HMC,
+                n_steps=4,
+                path_length=10,
+                max_steps=16,
+                vars=None,
+                cores=1,
+                return_inferencedata=True,
+                progressbar=True,
+                target_variable="X",
+            )
 
 
 class TestSimulator(SeededTest):

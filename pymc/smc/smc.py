@@ -34,6 +34,7 @@ from pymc.backends.ndarray import NDArray
 from pymc.blocking import DictToArrayBijection
 from pymc.model import Point, modelcontext
 from pymc.sampling import sample_prior_predictive
+from pymc.step_methods.hmc import HamiltonianMC
 from pymc.step_methods.metropolis import MultivariateNormalProposal
 from pymc.vartypes import discrete_types
 
@@ -154,7 +155,6 @@ class SMC_KERNEL(ABC):
         if threshold < 0 or threshold > 1:
             raise ValueError(f"Threshold value {threshold} must be between 0 and 1")
         self.threshold = threshold
-        self.model = model
         self.rng = np.random.default_rng(seed=random_seed)
 
         self.model = modelcontext(model)

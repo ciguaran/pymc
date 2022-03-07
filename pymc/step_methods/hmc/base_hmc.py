@@ -98,7 +98,7 @@ class BaseHMC(GradientSharedStep):
             blocked=blocked,
             model=self._model,
             dtype=dtype,
-            logp_dlogp_func=None,
+            logp_dlogp_func=logp_dlogp_func,
             **aesara_kwargs
         )
 
