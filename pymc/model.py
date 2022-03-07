@@ -694,7 +694,7 @@ class Model(Factor, WithMemoization, metaclass=ContextMeta):
     def ndim(self):
         return sum(var.ndim for var in self.value_vars)
 
-    def logp_dlogp_function(self, grad_vars=None, tempered=False, **kwargs):
+    def logp_dlogp_function(self, grad_vars=None, tempered=False, smc=False, beta=0, **kwargs):
         """Compile an Aesara function that computes logp and gradient.
 
         Parameters
@@ -719,6 +719,10 @@ class Model(Factor, WithMemoization, metaclass=ContextMeta):
             costs = [self.varlogpt + self.potentiallogpt, self.observedlogpt]
         else:
             costs = [self.logpt]
+
+        if smc:
+            # TODO: Better way to do this?
+            costs = [self.varlogpt + self.datalogpt * beta]
 
         input_vars = {i for i in graph_inputs(costs) if not isinstance(i, Constant)}
         extra_vars = [self.rvs_to_values.get(var, var) for var in self.free_RVs]
