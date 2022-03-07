@@ -333,6 +333,15 @@ class SMC_KERNEL(ABC):
             strace.record(point={k: v for k, v in zip(varnames, value)})
         return strace
 
+    def _tempered_posterior_p(self, samples):
+        """
+        Evaluates tempered posterior over samples, in log scale.
+        """
+        ll = np.array([self.likelihood_logp_func(prop) for prop in samples])
+        pl = np.array([self.prior_logp_func(prop) for prop in samples])
+        sample_logp = pl + ll * self.beta
+        return sample_logp, pl, ll
+
 
 class IMH(SMC_KERNEL):
     """Independent Metropolis-Hastings SMC kernel"""
@@ -399,9 +408,7 @@ class IMH(SMC_KERNEL):
             # We then compute the logp of proposing a transition to the new points
             forward_logp = self.proposal_dist.logpdf(proposal)
 
-            ll = np.array([self.likelihood_logp_func(prop) for prop in proposal])
-            pl = np.array([self.prior_logp_func(prop) for prop in proposal])
-            proposal_logp = pl + ll * self.beta
+            proposal_logp, pl, ll = self._tempered_posterior_p(proposal)
             accepted = log_R[n_step] < (
                 (proposal_logp + backward_logp) - (self.tempered_posterior_logp + forward_logp)
             )
@@ -510,10 +517,8 @@ class MH(SMC_KERNEL):
                 + self.proposal_dist(num_draws=self.draws, rng=self.rng)
                 * self.proposal_scales[:, None]
             )
-            ll = np.array([self.likelihood_logp_func(prop) for prop in proposal])
-            pl = np.array([self.prior_logp_func(prop) for prop in proposal])
 
-            proposal_logp = pl + ll * self.beta
+            proposal_logp, pl, ll = self._tempered_posterior_p(proposal)
             accepted = log_R[n_step] < (proposal_logp - self.tempered_posterior_logp)
 
             ac_[n_step] = accepted
