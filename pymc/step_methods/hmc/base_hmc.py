@@ -60,6 +60,7 @@ class BaseHMC(GradientSharedStep):
         t0=10,
         adapt_step_size=True,
         step_rand=None,
+        logp_dlogp_func=None,
         **aesara_kwargs
     ):
         """Set up Hamiltonian samplers with common structures.
@@ -92,7 +93,14 @@ class BaseHMC(GradientSharedStep):
         else:
             vars = [self._model.rvs_to_values.get(var, var) for var in vars]
 
-        super().__init__(vars, blocked=blocked, model=self._model, dtype=dtype, **aesara_kwargs)
+        super().__init__(
+            vars,
+            blocked=blocked,
+            model=self._model,
+            dtype=dtype,
+            logp_dlogp_func=None,
+            **aesara_kwargs
+        )
 
         self.adapt_step_size = adapt_step_size
         self.Emax = Emax
