@@ -159,9 +159,7 @@ class SMC_KERNEL(ABC):
 
         self.model = modelcontext(model)
         self.variables = inputvars(self.model.value_vars)
-
-        self.var_info = {}
-        self.tempered_posterior = None
+        self.particles = None
         self.prior_logp = None
         self.likelihood_logp = None
         self.tempered_posterior_logp = None
@@ -192,21 +190,14 @@ class SMC_KERNEL(ABC):
         """
         # Create dictionary that stores original variables shape and size
         initial_point = self.model.recompute_initial_point(seed=self.rng.integers(2 ** 30))
-        for v in self.variables:
-            self.var_info[v.name] = (initial_point[v.name].shape, initial_point[v.name].size)
+
         # Create particles bijection map
         if self.start:
             init_rnd = self.start
         else:
             init_rnd = self.initialize_population()
 
-        population = []
-        for i in range(self.draws):
-            point = Point({v.name: init_rnd[v.name][i] for v in self.variables}, model=self.model)
-            population.append(DictToArrayBijection.map(point).data)
-
-        self.tempered_posterior = np.array(floatX(population))
-
+        self.particles = Particles.build(self.draws, init_rnd, self.model, self.rng)
         # Initialize prior and likelihood log probabilities
         shared = make_shared_replacements(initial_point, self.variables, self.model)
 
@@ -217,8 +208,8 @@ class SMC_KERNEL(ABC):
             initial_point, [self.model.datalogpt], self.variables, shared
         )
 
-        priors = [self.prior_logp_func(sample) for sample in self.tempered_posterior]
-        likelihoods = [self.likelihood_logp_func(sample) for sample in self.tempered_posterior]
+        priors = [self.prior_logp_func(sample) for sample in self.particles.as_array]
+        likelihoods = [self.likelihood_logp_func(sample) for sample in self.particles.as_array]
 
         self.prior_logp = np.array(priors).squeeze()
         self.likelihood_logp = np.array(likelihoods).squeeze()
@@ -270,7 +261,7 @@ class SMC_KERNEL(ABC):
             np.arange(self.draws), size=self.draws, p=self.weights
         )
 
-        self.tempered_posterior = self.tempered_posterior[self.resampling_indexes]
+        self.particles.resample(self.resampling_indexes)
         self.prior_logp = self.prior_logp[self.resampling_indexes]
         self.likelihood_logp = self.likelihood_logp[self.resampling_indexes]
 
@@ -311,27 +302,7 @@ class SMC_KERNEL(ABC):
 
         This method should not be overwritten.
         """
-        lenght_pos = len(self.tempered_posterior)
-        varnames = [v.name for v in self.variables]
-
-        with self.model:
-            strace = NDArray(name=self.model.name)
-            strace.setup(lenght_pos, chain)
-        for i in range(lenght_pos):
-            value = []
-            size = 0
-            for varname in varnames:
-                shape, new_size = self.var_info[varname]
-                var_samples = self.tempered_posterior[i][size : size + new_size]
-                # Round discrete variable samples. The rounded values were the ones
-                # actually used in the logp evaluations (see logp_forw)
-                var = self.model[varname]
-                if var.dtype in discrete_types:
-                    var_samples = np.round(var_samples).astype(var.dtype)
-                value.append(var_samples.reshape(shape))
-                size += new_size
-            strace.record(point={k: v for k, v in zip(varnames, value)})
-        return strace
+        return self.particles.to_trace(chain)
 
     def _tempered_posterior_p(self, samples):
         """
@@ -383,12 +354,13 @@ class IMH(SMC_KERNEL):
 
         # Update MVNormal proposal based on the mean and covariance of the
         # tempered posterior.
-        cov = np.cov(self.tempered_posterior, ddof=0, rowvar=0)
+        tempered_posterior = self.particles.as_array
+        cov = np.cov(tempered_posterior, ddof=0, rowvar=0)
         cov = np.atleast_2d(cov)
         cov += 1e-6 * np.eye(cov.shape[0])
         if np.isnan(cov).any() or np.isinf(cov).any():
             raise ValueError('Sample covariances not valid! Likely "draws" is too small!')
-        mean = np.average(self.tempered_posterior, axis=0)
+        mean = np.average(tempered_posterior, axis=0)
         self.proposal_dist = multivariate_normal(mean, cov)
 
     def mutate(self):
@@ -401,7 +373,7 @@ class IMH(SMC_KERNEL):
         # We first compute the logp of proposing a transition to the current points.
         # This variable is updated at the end of the loop with the entries from the accepted
         # transitions, which is equivalent to recomputing it in every iteration of the loop.
-        backward_logp = self.proposal_dist.logpdf(self.tempered_posterior)
+        backward_logp = self.proposal_dist.logpdf(self.particles.as_array)
         for n_step in range(self.n_steps):
             proposal = floatX(self.proposal_dist.rvs(size=self.draws, random_state=self.rng))
             proposal = proposal.reshape(len(proposal), -1)
@@ -414,7 +386,7 @@ class IMH(SMC_KERNEL):
             )
 
             ac_[n_step] = accepted
-            self.tempered_posterior[accepted] = proposal[accepted]
+            self.particles.set(accepted, proposal[accepted])
             self.tempered_posterior_logp[accepted] = proposal_logp[accepted]
             self.prior_logp[accepted] = pl[accepted]
             self.likelihood_logp[accepted] = ll[accepted]
@@ -474,7 +446,7 @@ class MH(SMC_KERNEL):
         """Proposal dist is just a Multivariate Normal with unit identity covariance.
         Dimension specific scaling is provided by self.proposal_scales and set in self.tune()
         """
-        ndim = self.tempered_posterior.shape[1]
+        ndim = self.particles.as_array.shape[1]
         self.proposal_scales = np.full(self.draws, min(1, 2.38 ** 2 / ndim))
 
     def resample(self):
@@ -500,7 +472,7 @@ class MH(SMC_KERNEL):
             self.proposed = self.draws * self.n_steps
 
         # Update MVNormal proposal based on the covariance of the tempered posterior.
-        cov = np.cov(self.tempered_posterior, ddof=0, rowvar=0)
+        cov = np.cov(self.particles.as_array, ddof=0, rowvar=0)
         cov = np.atleast_2d(cov)
         cov += 1e-6 * np.eye(cov.shape[0])
         if np.isnan(cov).any() or np.isinf(cov).any():
@@ -513,7 +485,7 @@ class MH(SMC_KERNEL):
         log_R = np.log(self.rng.random((self.n_steps, self.draws)))
         for n_step in range(self.n_steps):
             proposal = floatX(
-                self.tempered_posterior
+                self.particles.as_array
                 + self.proposal_dist(num_draws=self.draws, rng=self.rng)
                 * self.proposal_scales[:, None]
             )
@@ -522,7 +494,7 @@ class MH(SMC_KERNEL):
             accepted = log_R[n_step] < (proposal_logp - self.tempered_posterior_logp)
 
             ac_[n_step] = accepted
-            self.tempered_posterior[accepted] = proposal[accepted]
+            self.particles.set(accepted, proposal[accepted])
             self.prior_logp[accepted] = pl[accepted]
             self.likelihood_logp[accepted] = ll[accepted]
             self.tempered_posterior_logp[accepted] = proposal_logp[accepted]
@@ -552,7 +524,7 @@ class MH(SMC_KERNEL):
 
 
 class HMC(SMC_KERNEL):
-    def __init__(self, n_steps, vars, path_length, max_steps, target_variable, **kwargs):
+    def __init__(self, n_steps, vars, path_length, max_steps, **kwargs):
         super().__init__(**kwargs)
         self.hmc_chains = None
         self.steps_stats = []
@@ -563,7 +535,6 @@ class HMC(SMC_KERNEL):
         self.acceptance_rates = None
         self.divergence_rates = None
         self.n_chains = None
-        self.target_variable = target_variable
 
     def _build_hmc_chains(self):
         tempered_compiled_logp = self.build_tempered_logp_dlogp_func()
@@ -575,7 +546,7 @@ class HMC(SMC_KERNEL):
         ]
 
     def setup_kernel(self):
-        self.n_chains = self.tempered_posterior.shape[0]
+        self.n_chains = len(self.particles)
         self._build_hmc_chains()
 
     def update_beta_and_weights(self):
@@ -587,23 +558,21 @@ class HMC(SMC_KERNEL):
         mutated_particles = []
         self.acceptance_rates = []
         self.divergence_rates = []
-        for chain, particle in zip(self.hmc_chains, self.tempered_posterior):
-            # TODO this only works for one target variable (aka posterior of just one variable).
-            q = {self.target_variable: particle[0] if particle.shape == (1,) else particle}
+        for chain, particle in zip(self.hmc_chains, self.particles):
             accepted = 0
             diverging = 0
             for step in range(self.max_steps):
-                q, step_stats = chain.step(q)
+                q, step_stats = chain.step(particle)
                 accepted += 1 if step_stats[0]["accepted"] else 0
                 diverging += 1 if step_stats[0]["diverging"] else 0
             self.acceptance_rates.append(accepted / self.max_steps)
             self.divergence_rates.append(diverging / self.max_steps)
             mutated_particles.append(q)
 
-        samples = [p[self.target_variable].ravel() for p in mutated_particles]
+        samples = [DictToArrayBijection.map(mp).data.ravel() for mp in mutated_particles]
         tempered_posterior_logp, pl, ll = self._tempered_posterior_p(samples)
 
-        self.tempered_posterior = np.array(samples)
+        self.particles.set(None, np.array(samples))
         self.prior_logp = pl
         self.likelihood_logp = ll
         self.tempered_posterior_logp = tempered_posterior_logp
@@ -660,3 +629,101 @@ def _logp_forw(point, out_vars, in_vars, shared):
     f = compile_pymc([inarray0], out_list[0])
     f.trust_input = True
     return f
+
+
+class Particles:
+    """
+    List of draws from variables (particles)
+    that can be modified in place. For different
+    usages, provides both array and list of points
+    representations.
+    """
+
+    @classmethod
+    def build(cls, draws: int, init_rnd, model, random_seed):
+        rng = np.random.default_rng(seed=random_seed)
+        initial_point = model.recompute_initial_point(seed=rng.integers(2 ** 30))
+        var_info = {}
+        variables = inputvars(model.value_vars)
+        for v in variables:
+            var_info[v.name] = (initial_point[v.name].shape, initial_point[v.name].size)
+        points = [
+            Point({v.name: init_rnd[v.name][i] for v in variables}, model=model)
+            for i in range(draws)
+        ]
+        draws = draws
+        return Particles(points, draws, var_info, variables, model)
+
+    def __init__(self, points, draws, var_info, variables, model):
+        self.as_array = np.array(floatX([DictToArrayBijection.map(point).data for point in points]))
+        self.draws = draws
+        self.points = points
+        self.var_info = var_info
+        self.variables = variables
+        self.model = model
+
+    def as_array(self):
+        return self.as_array
+
+    def resample(self, resampling_indexes):
+        self.as_array = self.as_array[resampling_indexes]
+        self.points = [self.points[i] for i in resampling_indexes]
+
+    def __getitem__(self, key):
+        return self.as_array[key]
+
+    def __len__(self):
+        return self.draws
+
+    def __iter__(self):
+        yield from self.points
+
+    def set(self, indexes, values):
+        """
+        Consistently updates array and points
+        representations
+        """
+        if indexes is None:
+            # if no index is selected, modify all
+            indexes = [True] * len(self.points)
+            if not len(values) == len(self):
+                raise ValueError(
+                    "If values size doesn't match particle size, then indexes need to be specified"
+                )
+
+        self.as_array[indexes] = values
+        values_index = 0
+        for index in range(0, len(self.points)):
+            if indexes[index]:
+                existing_particle = self.points[index]
+                new_value = values[values_index]
+                values_index += 1
+                size = 0
+                for varname in (v.name for v in self.variables):
+                    shape, new_size = self.var_info[varname]
+                    var_samples = new_value[size : size + new_size]
+                    existing_particle[varname] = var_samples
+                    size += new_size
+
+    def to_trace(self, chain):
+        lenght_pos = len(self.as_array)
+        varnames = [v.name for v in self.variables]
+
+        with self.model:
+            strace = NDArray(name=self.model.name)
+            strace.setup(lenght_pos, chain)
+        for i in range(lenght_pos):
+            value = []
+            size = 0
+            for varname in varnames:
+                shape, new_size = self.var_info[varname]
+                var_samples = self.as_array[i][size : size + new_size]
+                # Round discrete variable samples. The rounded values were the ones
+                # actually used in the logp evaluations (see logp_forw)
+                var = self.model[varname]
+                if var.dtype in discrete_types:
+                    var_samples = np.round(var_samples).astype(var.dtype)
+                value.append(var_samples.reshape(shape))
+                size += new_size
+            strace.record(point={k: v for k, v in zip(varnames, value)})
+        return strace

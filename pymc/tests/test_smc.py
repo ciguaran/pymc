@@ -11,6 +11,7 @@
 #   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
+import copy
 
 import aesara
 import aesara.tensor as at
@@ -32,7 +33,7 @@ import pymc as pm
 
 from pymc.aesaraf import floatX
 from pymc.backends.base import MultiTrace
-from pymc.smc.smc import HMC, IMH
+from pymc.smc.smc import HMC, IMH, Particles
 from pymc.tests.helpers import SeededTest, assert_random_state_equal
 
 
@@ -266,14 +267,7 @@ class TestSMC(SeededTest):
     def test_hmc_sample_fast(self):
         with self.fast_model_with_difference:
             inference_data = pm.sample_smc(
-                10,
-                kernel=HMC,
-                n_steps=2,
-                path_length=1,
-                max_steps=4,
-                vars=None,
-                cores=1,
-                target_variable="x",
+                10, kernel=HMC, n_steps=2, path_length=1, max_steps=4, vars=None, cores=1
             )
             stats = inference_data.sample_stats
         assert stats.mean_acceptance_rate is not None
@@ -307,7 +301,7 @@ class TestSMC(SeededTest):
             assert len(mutated_particles[0]) == 1
             assert "x" in mutated_particles[0]
             samples = [particle["x"] for particle in mutated_particles]
-            assert np.mean(samples) == approx(1, abs=1)
+            assert np.mean(samples) == approx(1, abs=1)  # this one is flaky, fix.
 
             stats = sampler.sample_stats()
             assert stats["beta"] == 0
@@ -641,3 +635,58 @@ class TestMHKernel(SeededTest):
                 kernel=pm.smc.MH,
                 return_inferencedata=False,
             )
+
+
+class TestParticles(SeededTest):
+    def setup_class(self):
+        super().setup_class()
+        with pm.Model() as self.model:
+            a = pm.Poisson("a", 5)
+            b = pm.HalfNormal("b", 10)
+            y = pm.Normal("y", a, b, observed=[1, 2, 3, 4])
+
+        self.particles = Particles.build(
+            10,
+            {
+                "a": np.random.poisson(5, size=500),
+                "b_log__": np.abs(np.random.normal(0, 10, size=500)),
+            },
+            self.model,
+            1243,
+        )
+
+    def test_build(self):
+        assert [v.name for v in self.particles.variables] == ["b_log__", "a"]
+        assert self.particles.as_array().shape == (10, 2)
+
+    def test_array_points_equivalence(self):
+        assert len(self.particles) == 10
+        assert len(self.particles.as_array()) == 10
+        assert len(self.particles.points) == 10
+
+        for i in range(0, len(self.particles)):
+            assert self.particles.as_array()[i][0] == self.particles.points[i]["b_log__"]
+            assert self.particles.as_array()[i][1] == self.particles.points[i]["a"]
+
+    def test_to_trace(self):
+        samples = self.particles.to_trace(0).samples
+        assert set(samples.keys()) == {"a", "b", "b_log__"}
+        assert samples["a"].dtype == "int64"
+
+    def test_resample(self):
+        initial = copy.copy(self.particles)
+        self.particles.resample([9, 1, 2, 3, 4, 5, 6, 7, 8, 0])
+        for i in range(1, 9):
+            assert np.allclose(initial.as_array[i] == self.particles.as_array[i])
+            assert initial.points[i] == self.particles.points[i]
+
+        assert np.allclose(initial.as_array[9] == self.particles.as_array[0])
+        assert initial.points[9] == self.particles.points[0]
+
+    def test_set(self):
+        expected_particle_value = np.array([[12, 2]])
+        self.particles.set([True] + [False] * 9, expected_particle_value)
+        assert np.allclose(self.particles.as_array[0], np.array([12, 2]))
+        assert {"b_log__", "a"} == set(self.particles.points[0].keys())
+        assert np.isclose(self.particles.points[0]["b_log__"], np.array(12))
+        assert np.isclose(self.particles.points[0]["a"], np.array(2))
