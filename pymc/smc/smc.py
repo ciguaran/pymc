@@ -561,8 +561,13 @@ class HMC(SMC_KERNEL):
         for chain, particle in zip(self.hmc_chains, self.particles):
             accepted = 0
             diverging = 0
+            # TODO: this is to avoid some errors at the model level.
+            q = {
+                var: particle[var][0] if particle[var].shape == (1,) else particle[var]
+                for var in particle
+            }
             for step in range(self.max_steps):
-                q, step_stats = chain.step(particle)
+                q, step_stats = chain.step(q)
                 accepted += 1 if step_stats[0]["accepted"] else 0
                 diverging += 1 if step_stats[0]["diverging"] else 0
             self.acceptance_rates.append(accepted / self.max_steps)
@@ -706,13 +711,12 @@ class Particles:
                     size += new_size
 
     def to_trace(self, chain):
-        lenght_pos = len(self.as_array)
         varnames = [v.name for v in self.variables]
 
         with self.model:
             strace = NDArray(name=self.model.name)
-            strace.setup(lenght_pos, chain)
-        for i in range(lenght_pos):
+            strace.setup(len(self), chain)
+        for i in range(len(self)):
             value = []
             size = 0
             for varname in varnames:

@@ -280,10 +280,10 @@ class TestSMC(SeededTest):
         """
         with self.fast_model_with_difference:
             """
-            Then kernel setup builds one particle per draw
+            Then sampler setup builds one particle per draw
             """
             expected_draws = 10
-            sampler = HMC(10, None, 10, 10, draws=expected_draws, target_variable="x")
+            sampler = HMC(10, None, 10, 10, draws=expected_draws)
             sampler._initialize_kernel()
             sampler.setup_kernel()
             assert len(sampler.hmc_chains) == expected_draws
@@ -319,7 +319,6 @@ class TestSMC(SeededTest):
                 cores=1,
                 return_inferencedata=True,
                 progressbar=True,
-                target_variable="X",
             )
 
 
@@ -657,16 +656,16 @@ class TestParticles(SeededTest):
 
     def test_build(self):
         assert [v.name for v in self.particles.variables] == ["b_log__", "a"]
-        assert self.particles.as_array().shape == (10, 2)
+        assert self.particles.as_array.shape == (10, 2)
 
     def test_array_points_equivalence(self):
         assert len(self.particles) == 10
-        assert len(self.particles.as_array()) == 10
+        assert len(self.particles.as_array) == 10
         assert len(self.particles.points) == 10
 
         for i in range(0, len(self.particles)):
-            assert self.particles.as_array()[i][0] == self.particles.points[i]["b_log__"]
-            assert self.particles.as_array()[i][1] == self.particles.points[i]["a"]
+            assert self.particles.as_array[i][0] == self.particles.points[i]["b_log__"]
+            assert self.particles.as_array[i][1] == self.particles.points[i]["a"]
 
     def test_to_trace(self):
         samples = self.particles.to_trace(0).samples
@@ -677,10 +676,10 @@ class TestParticles(SeededTest):
         initial = copy.copy(self.particles)
         self.particles.resample([9, 1, 2, 3, 4, 5, 6, 7, 8, 0])
         for i in range(1, 9):
-            assert np.allclose(initial.as_array[i] == self.particles.as_array[i])
+            assert np.allclose(initial.as_array[i], self.particles.as_array[i])
             assert initial.points[i] == self.particles.points[i]
 
-        assert np.allclose(initial.as_array[9] == self.particles.as_array[0])
+        assert np.allclose(initial.as_array[9], self.particles.as_array[0])
         assert initial.points[9] == self.particles.points[0]
 
     def test_set(self):
@@ -690,3 +689,9 @@ class TestParticles(SeededTest):
         assert {"b_log__", "a"} == set(self.particles.points[0].keys())
         assert np.isclose(self.particles.points[0]["b_log__"], np.array(12))
         assert np.isclose(self.particles.points[0]["a"], np.array(2))
+
+    def test_set_no_indexes(self):
+        with pytest.raises(
+            ValueError,
+        ):
+            self.particles.set(None, np.array([[12, 2]]))
