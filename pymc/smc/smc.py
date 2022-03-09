@@ -555,6 +555,8 @@ class HMC(SMC_KERNEL):
 
     def mutate(self):
         # TODO This is serial, multithreaded?
+        # This kind of approach makes iterations slow in comparison
+        # to other kernels
         mutated_particles = []
         self.acceptance_rates = []
         self.divergence_rates = []

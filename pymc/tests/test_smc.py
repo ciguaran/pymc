@@ -309,17 +309,19 @@ class TestSMC(SeededTest):
 
     def test_hmc_sample_gaussian(self):
         with self.SMC_test:
-            idata_smc_hmc = pm.sample_smc(
+            trace = pm.sample_smc(
                 10,
                 kernel=HMC,
-                n_steps=4,
+                n_steps=15,
                 path_length=10,
                 max_steps=16,
                 vars=None,
                 cores=1,
-                return_inferencedata=True,
-                progressbar=True,
+                return_inferencedata=False,
             )
+
+            np.testing.assert_allclose(self.muref, np.abs(trace["X"]).mean(axis=0), atol=0.05)
+            # TODO: Is this tolerance ok?
 
 
 class TestSimulator(SeededTest):
